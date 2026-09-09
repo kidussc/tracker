@@ -1,0 +1,496 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  :root {
+    --bg: #0a0e13;
+    --panel: #10161d;
+    --line: #22303c;
+    --cyan: #4fd6c8;
+    --amber: #f2a340;
+    --text: #cfe3e6;
+    --text-dim: #6f8790;
+  }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    overflow: hidden;
+  }
+  #scene { position: absolute; inset: 0; }
+  canvas { display: block; }
+
+  .hud {
+    position: absolute;
+    top: 16px;
+    left: 16px;
+    background: rgba(16, 22, 29, 0.82);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 14px 18px;
+    min-width: 220px;
+    backdrop-filter: blur(2px);
+  }
+  .hud h1 {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    margin: 0 0 10px 0;
+    color: var(--cyan);
+  }
+  .row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    line-height: 1.9;
+    color: var(--text-dim);
+    gap: 18px;
+  }
+  .row span.val {
+    color: var(--text);
+  }
+  .row span.val.amber { color: var(--amber); }
+  .phase-badge {
+    display: inline-block;
+    margin-top: 8px;
+    padding: 2px 8px;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    font-size: 11px;
+    letter-spacing: 0.03em;
+    color: var(--cyan);
+  }
+
+  .controls {
+    position: absolute;
+    bottom: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(16, 22, 29, 0.88);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: min(640px, 84vw);
+  }
+  button#playBtn {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    color: var(--cyan);
+    font-family: inherit;
+    font-size: 12px;
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    letter-spacing: 0.03em;
+  }
+  button#playBtn:hover { border-color: var(--cyan); }
+  input[type="range"] {
+    flex: 1;
+    accent-color: var(--cyan);
+  }
+  #timeLabel {
+    font-size: 11px;
+    color: var(--text-dim);
+    width: 64px;
+    text-align: right;
+  }
+  select#speed {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--line);
+    font-family: inherit;
+    font-size: 11px;
+    border-radius: 4px;
+    padding: 4px;
+  }
+
+  .legend {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    background: rgba(16, 22, 29, 0.82);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 10px 14px;
+    font-size: 11px;
+    color: var(--text-dim);
+    line-height: 1.8;
+  }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
+</style>
+</head>
+<body>
+
+<div id="scene"></div>
+
+<div class="hud">
+  <h1>TRACKER — LIVE POINTING</h1>
+  <div class="row"><span>T+</span><span class="val" id="hudTime">0.0 s</span></div>
+  <div class="row"><span>YAW</span><span class="val amber" id="hudYaw">0.0°</span></div>
+  <div class="row"><span>PITCH</span><span class="val amber" id="hudPitch">0.0°</span></div>
+  <div class="row"><span>ALTITUDE</span><span class="val" id="hudAlt">0 m</span></div>
+  <div class="row"><span>RANGE</span><span class="val" id="hudRange">0 m</span></div>
+  <div class="phase-badge" id="hudPhase">STANDBY</div>
+</div>
+
+<div class="legend">
+  <div><span class="dot" style="background:var(--cyan)"></span>Flight path</div>
+  <div><span class="dot" style="background:var(--amber)"></span>Rocket</div>
+  <div><span class="dot" style="background:#8a97a3"></span>Antenna / tower</div>
+</div>
+
+<div class="controls">
+  <button id="playBtn">▶ PLAY</button>
+  <input type="range" id="scrub" min="0" max="1" step="0.001" value="0" />
+  <span id="timeLabel">0.0 s</span>
+  <select id="speed">
+    <option value="1">1×</option>
+    <option value="2">2×</option>
+    <option value="5" selected>5×</option>
+    <option value="10">10×</option>
+  </select>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ---------------------------------------------------------------------
+// Trajectory data: [t_seconds, east_m, north_m, altitude_m]
+// Downsampled from openrocket_sample.csv, tower offset already applied
+// (relative to the ANTENNA, matching fusion.py's ENU convention).
+// Swap this array for your team's real model output once available —
+// same shape, everything else keeps working.
+// ---------------------------------------------------------------------
+const TRAJECTORY = [[0.0, 0.1, 500.1, 1.0], [1.6, 2.2, 501.3, 154.7], [3.2, 4.3, 502.5, 567.1], [4.8, 6.4, 503.7, 1188.5], [6.4, 8.4, 504.9, 1808.0], [8.0, 10.5, 506.1, 2402.3], [9.6, 12.6, 507.3, 2971.6], [11.2, 14.7, 508.5, 3515.8], [12.8, 16.8, 509.7, 4034.8], [14.4, 18.8, 510.9, 4528.8], [16.0, 20.9, 512.1, 4997.6], [17.6, 23.0, 513.3, 5441.3], [19.2, 25.1, 514.5, 5859.9], [20.8, 27.1, 515.7, 6253.4], [22.4, 29.2, 516.9, 6621.8], [24.0, 31.3, 518.1, 6965.1], [25.6, 33.4, 519.3, 7283.2], [27.2, 35.5, 520.5, 7576.2], [28.8, 37.5, 521.7, 7844.1], [30.4, 39.6, 522.9, 8086.9], [32.0, 41.7, 524.1, 8304.6], [33.6, 43.8, 525.3, 8497.2], [35.2, 45.9, 526.5, 8664.7], [36.8, 47.9, 527.7, 8807.0], [38.4, 50.0, 528.9, 8924.3], [40.0, 52.1, 530.1, 9016.4], [41.6, 54.2, 531.3, 9083.4], [43.2, 56.2, 532.5, 9125.3], [44.8, 58.3, 533.7, 9142.1], [46.4, 72.9, 542.1, 9112.3], [48.0, 91.6, 552.9, 9072.3], [49.6, 110.3, 563.7, 9032.3], [51.2, 129.0, 574.5, 8992.3], [52.8, 147.7, 585.3, 8952.3], [54.4, 166.4, 596.1, 8912.3], [56.0, 185.1, 606.9, 8872.3], [57.6, 203.8, 617.7, 8832.3], [59.2, 222.5, 628.5, 8792.3], [60.8, 241.2, 639.3, 8752.3], [62.4, 259.9, 650.1, 8712.3], [64.0, 278.6, 660.9, 8672.3], [65.6, 297.3, 671.7, 8632.3], [67.2, 316.1, 682.5, 8592.3], [68.8, 334.8, 693.3, 8552.3], [70.4, 353.5, 704.1, 8512.3], [72.0, 372.2, 714.9, 8472.3], [73.6, 390.9, 725.7, 8432.3], [75.2, 409.6, 736.5, 8392.3], [76.8, 428.3, 747.3, 8352.3], [78.4, 447.0, 758.1, 8312.3], [80.0, 465.7, 768.9, 8272.3], [81.6, 484.4, 779.7, 8232.3], [83.2, 503.1, 790.5, 8192.3], [84.8, 521.8, 801.3, 8152.3], [86.4, 540.5, 812.1, 8112.3], [88.0, 559.2, 822.9, 8072.3], [89.6, 577.9, 833.7, 8032.3], [91.2, 596.6, 844.5, 7992.3], [92.8, 615.4, 855.3, 7952.3], [94.4, 634.1, 866.1, 7912.3], [96.0, 652.8, 876.9, 7872.3], [97.6, 671.5, 887.7, 7832.3], [99.2, 690.2, 898.5, 7792.3], [100.8, 708.9, 909.3, 7752.3], [102.4, 727.6, 920.1, 7712.3], [104.0, 746.3, 930.9, 7672.3], [105.6, 765.0, 941.7, 7632.3], [107.2, 783.7, 952.5, 7592.3], [108.8, 802.4, 963.3, 7552.3], [110.4, 821.1, 974.1, 7512.3], [112.0, 839.8, 984.9, 7472.3], [113.6, 858.5, 995.7, 7432.3], [115.2, 877.2, 1006.5, 7392.3], [116.8, 895.9, 1017.3, 7352.3], [118.4, 914.7, 1028.1, 7312.3], [120.0, 933.4, 1038.9, 7272.3], [121.6, 952.1, 1049.7, 7232.3], [123.2, 970.8, 1060.5, 7192.3], [124.8, 989.5, 1071.3, 7152.3], [126.4, 1008.2, 1082.1, 7112.3], [128.0, 1026.9, 1092.9, 7072.3], [129.6, 1045.6, 1103.7, 7032.3], [131.2, 1064.3, 1114.5, 6992.3], [132.8, 1083.0, 1125.3, 6952.3], [134.4, 1101.7, 1136.1, 6912.3], [136.0, 1120.4, 1146.9, 6872.3], [137.6, 1139.1, 1157.7, 6832.3], [139.2, 1157.8, 1168.5, 6792.3], [140.8, 1176.5, 1179.3, 6752.3], [142.4, 1195.2, 1190.1, 6712.3], [144.0, 1214.0, 1200.9, 6672.3], [145.6, 1232.7, 1211.7, 6632.3], [147.2, 1251.4, 1222.5, 6592.3], [148.8, 1270.1, 1233.3, 6552.3], [150.4, 1288.8, 1244.1, 6512.3], [152.0, 1307.5, 1254.9, 6472.3], [153.6, 1326.2, 1265.7, 6432.3], [155.2, 1344.9, 1276.5, 6392.3], [156.8, 1363.6, 1287.3, 6352.3], [158.4, 1382.3, 1298.1, 6312.3], [160.0, 1401.0, 1308.9, 6272.3], [161.6, 1419.7, 1319.7, 6232.3], [163.2, 1438.4, 1330.5, 6192.3], [164.8, 1457.1, 1341.3, 6152.3], [166.4, 1475.8, 1352.1, 6112.3], [168.0, 1494.5, 1362.9, 6072.3], [169.6, 1513.2, 1373.7, 6032.3], [171.2, 1532.0, 1384.5, 5992.3], [172.8, 1550.7, 1395.3, 5952.3], [174.4, 1569.4, 1406.1, 5912.3], [176.0, 1588.1, 1416.9, 5872.3], [177.6, 1606.8, 1427.7, 5832.3], [179.2, 1625.5, 1438.5, 5792.3], [180.8, 1644.2, 1449.3, 5752.3], [182.4, 1662.9, 1460.1, 5712.3], [184.0, 1681.6, 1470.9, 5672.3], [185.6, 1700.3, 1481.7, 5632.3], [187.2, 1719.0, 1492.5, 5592.3], [188.8, 1737.7, 1503.3, 5552.3], [190.4, 1756.4, 1514.1, 5512.3], [192.0, 1775.1, 1524.9, 5472.3], [193.6, 1793.8, 1535.7, 5432.3], [195.2, 1812.5, 1546.5, 5392.3], [196.8, 1831.3, 1557.3, 5352.3], [198.4, 1850.0, 1568.1, 5312.3], [200.0, 1868.7, 1578.9, 5272.3], [201.6, 1887.4, 1589.7, 5232.3], [203.2, 1906.1, 1600.5, 5192.3], [204.8, 1924.8, 1611.3, 5152.3], [206.4, 1943.5, 1622.1, 5112.3], [208.0, 1962.2, 1632.9, 5072.3], [209.6, 1980.9, 1643.7, 5032.3], [211.2, 1999.6, 1654.5, 4992.3], [212.8, 2018.3, 1665.3, 4952.3], [214.4, 2037.0, 1676.1, 4912.3], [216.0, 2055.7, 1686.9, 4872.3], [217.6, 2074.4, 1697.7, 4832.3], [219.2, 2093.1, 1708.5, 4792.3], [220.8, 2111.8, 1719.3, 4752.3], [222.4, 2130.6, 1730.1, 4712.3], [224.0, 2149.3, 1740.9, 4672.3], [225.6, 2168.0, 1751.7, 4632.3], [227.2, 2186.7, 1762.5, 4592.3], [228.8, 2205.4, 1773.3, 4552.3], [230.4, 2224.1, 1784.1, 4512.3], [232.0, 2242.8, 1794.9, 4472.3], [233.6, 2261.5, 1805.7, 4432.3], [235.2, 2280.2, 1816.5, 4392.3], [236.8, 2298.9, 1827.3, 4352.3], [238.4, 2317.6, 1838.1, 4312.3], [240.0, 2336.3, 1848.9, 4272.3], [241.6, 2355.0, 1859.7, 4232.3], [243.2, 2373.7, 1870.5, 4192.3], [244.8, 2392.4, 1881.3, 4152.3], [246.4, 2411.1, 1892.1, 4112.3], [248.0, 2429.9, 1902.9, 4072.3], [249.6, 2448.6, 1913.7, 4032.3], [251.2, 2467.3, 1924.5, 3992.3], [252.8, 2486.0, 1935.3, 3952.3], [254.4, 2504.7, 1946.1, 3912.3], [256.0, 2523.4, 1956.9, 3872.3], [257.6, 2542.1, 1967.7, 3832.3], [259.2, 2560.8, 1978.5, 3792.3], [260.8, 2579.5, 1989.3, 3752.3], [262.4, 2598.2, 2000.1, 3712.3], [264.0, 2616.9, 2010.9, 3672.3], [265.6, 2635.6, 2021.7, 3632.3], [267.2, 2654.3, 2032.5, 3592.3], [268.8, 2673.0, 2043.3, 3552.3], [270.4, 2691.7, 2054.1, 3512.3], [272.0, 2710.4, 2064.9, 3472.3], [273.6, 2729.1, 2075.7, 3432.3], [275.2, 2747.9, 2086.5, 3392.3], [276.8, 2766.6, 2097.3, 3352.3], [278.4, 2785.3, 2108.1, 3312.3], [280.0, 2804.0, 2118.9, 3272.3], [281.6, 2822.7, 2129.7, 3232.3], [283.2, 2841.4, 2140.5, 3192.3], [284.8, 2860.1, 2151.3, 3152.3], [286.4, 2878.8, 2162.1, 3112.3], [288.0, 2897.5, 2172.9, 3072.3], [289.6, 2916.2, 2183.7, 3032.3], [291.2, 2934.9, 2194.5, 2992.3], [292.8, 2953.6, 2205.3, 2952.3], [294.4, 2972.3, 2216.1, 2912.3], [296.0, 2991.0, 2226.9, 2872.3], [297.6, 3009.7, 2237.7, 2832.3], [299.2, 3028.4, 2248.5, 2792.3], [300.8, 3047.2, 2259.3, 2752.3], [302.4, 3065.9, 2270.1, 2712.3], [304.0, 3084.6, 2280.9, 2672.3], [305.6, 3103.3, 2291.7, 2632.3], [307.2, 3122.0, 2302.5, 2592.3], [308.8, 3140.7, 2313.3, 2552.3], [310.4, 3159.4, 2324.1, 2512.3], [312.0, 3178.1, 2334.9, 2472.3], [313.6, 3196.8, 2345.7, 2432.3], [315.2, 3215.5, 2356.5, 2392.3], [316.8, 3234.2, 2367.3, 2352.3], [318.4, 3252.9, 2378.1, 2312.3], [320.0, 3271.6, 2388.9, 2272.3], [321.6, 3290.3, 2399.7, 2232.3], [323.2, 3309.0, 2410.5, 2192.3], [324.8, 3327.7, 2421.3, 2152.3], [326.4, 3346.5, 2432.1, 2112.3], [328.0, 3365.2, 2442.9, 2072.3], [329.6, 3383.9, 2453.7, 2032.3], [331.2, 3402.6, 2464.5, 1992.3], [332.8, 3421.3, 2475.3, 1952.3], [334.4, 3440.0, 2486.1, 1912.3], [336.0, 3458.7, 2496.9, 1872.3], [337.6, 3477.4, 2507.7, 1832.3], [339.2, 3496.1, 2518.5, 1792.3], [340.8, 3514.8, 2529.3, 1752.3], [342.4, 3533.5, 2540.1, 1712.3], [344.0, 3552.2, 2550.9, 1672.3], [345.6, 3570.9, 2561.7, 1632.3], [347.2, 3589.6, 2572.5, 1592.3], [348.8, 3608.3, 2583.3, 1552.3], [350.4, 3627.0, 2594.1, 1512.3], [352.0, 3645.8, 2604.9, 1472.3], [353.6, 3664.5, 2615.7, 1432.3], [355.2, 3683.2, 2626.5, 1392.3], [356.8, 3701.9, 2637.3, 1352.3], [358.4, 3720.6, 2648.1, 1312.3], [360.0, 3739.3, 2658.9, 1272.3], [361.6, 3758.0, 2669.7, 1232.3], [363.2, 3776.7, 2680.5, 1192.3], [364.8, 3795.4, 2691.3, 1152.3], [366.4, 3814.1, 2702.1, 1112.3], [368.0, 3832.8, 2712.9, 1072.3], [369.6, 3851.5, 2723.7, 1032.3], [371.2, 3870.2, 2734.5, 992.3], [372.8, 3888.9, 2745.3, 952.3], [374.4, 3907.6, 2756.1, 912.3], [376.0, 3926.3, 2766.9, 872.3], [377.6, 3945.0, 2777.7, 832.3], [379.2, 3963.8, 2788.5, 792.3], [380.8, 3982.5, 2799.3, 752.3], [382.4, 4001.2, 2810.1, 712.3], [384.0, 4019.9, 2820.9, 672.3], [385.6, 4038.6, 2831.7, 632.3], [387.2, 4057.3, 2842.5, 592.3], [388.8, 4076.0, 2853.3, 552.3], [390.4, 4094.7, 2864.1, 512.3], [392.0, 4113.4, 2874.9, 472.3], [393.6, 4132.1, 2885.7, 432.3], [395.2, 4150.8, 2896.5, 392.3], [396.8, 4169.5, 2907.3, 352.3], [398.4, 4188.2, 2918.1, 312.3], [400.0, 4206.9, 2928.9, 272.3], [401.6, 4225.6, 2939.7, 232.3], [403.2, 4244.3, 2950.5, 192.3], [404.8, 4263.1, 2961.3, 152.3], [406.4, 4281.8, 2972.1, 112.3], [408.0, 4300.5, 2982.9, 72.3], [409.6, 4319.2, 2993.7, 32.3]];
+
+const TOWER_POS = { east: 0, north: 500 }; // matches fusion.py placeholder offset
+
+// ---------------------------------------------------------------------
+// Scene setup
+// ---------------------------------------------------------------------
+const container = document.getElementById('scene');
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0e13, 0.00012);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 1, 40000);
+let camDist = 6500, camYaw = 0.7, camPitch = 0.35;
+function updateCamera() {
+  camera.position.set(
+    camDist * Math.sin(camYaw) * Math.cos(camPitch),
+    camDist * Math.sin(camPitch) + 400,
+    camDist * Math.cos(camYaw) * Math.cos(camPitch)
+  );
+  camera.lookAt(0, 900, 600);
+}
+updateCamera();
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x0a0e13);
+container.appendChild(renderer.domElement);
+
+// manual orbit controls (drag to rotate, wheel to zoom) — no OrbitControls dependency
+let dragging = false, lastX = 0, lastY = 0;
+renderer.domElement.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+window.addEventListener('mouseup', () => dragging = false);
+window.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  camYaw -= (e.clientX - lastX) * 0.005;
+  camPitch = Math.max(0.05, Math.min(1.4, camPitch + (e.clientY - lastY) * 0.005));
+  lastX = e.clientX; lastY = e.clientY;
+  updateCamera();
+});
+renderer.domElement.addEventListener('wheel', e => {
+  camDist = Math.max(800, Math.min(16000, camDist + e.deltaY * 2));
+  updateCamera();
+}, { passive: true });
+
+// lighting
+scene.add(new THREE.AmbientLight(0x8899aa, 0.9));
+const sun = new THREE.DirectionalLight(0xffffff, 0.6);
+sun.position.set(3000, 5000, 2000);
+scene.add(sun);
+
+// ground grid
+const grid = new THREE.GridHelper(12000, 40, 0x24343f, 0x1a262f);
+scene.add(grid);
+const groundMat = new THREE.MeshBasicMaterial({ color: 0x0d1319, transparent: true, opacity: 0.6 });
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(12000, 12000), groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -1;
+scene.add(ground);
+
+// helper: (east, north, alt) -> three.js (x, y, z). North = -Z, East = +X, Up = +Y
+function toScene(east, north, alt) {
+  return new THREE.Vector3(east, alt, -north);
+}
+
+// flight path line, colored boost(amber)->coast/descent(cyan) by altitude trend
+const pathPts = TRAJECTORY.map(([t, e, n, a]) => toScene(e, n, a));
+const pathGeom = new THREE.BufferGeometry().setFromPoints(pathPts);
+const pathLine = new THREE.Line(pathGeom, new THREE.LineBasicMaterial({ color: 0x4fd6c8, transparent: true, opacity: 0.55 }));
+scene.add(pathLine);
+
+// tower marker
+const towerPos = toScene(TOWER_POS.east, TOWER_POS.north, 0);
+const towerMesh = new THREE.Mesh(
+  new THREE.ConeGeometry(18, 60, 8),
+  new THREE.MeshStandardMaterial({ color: 0x8a97a3 })
+);
+towerMesh.position.copy(towerPos).add(new THREE.Vector3(0, 30, 0));
+scene.add(towerMesh);
+
+// ---------------------------------------------------------------------
+// Antenna gimbal: base -> azimuth (yaw) group -> elevation (pitch) arm -> dish
+// ---------------------------------------------------------------------
+const gimbalOrigin = new THREE.Vector3(0, 0, 0); // antenna is the ENU origin
+
+const base = new THREE.Mesh(
+  new THREE.CylinderGeometry(40, 55, 50, 16),
+  new THREE.MeshStandardMaterial({ color: 0x1b2530 })
+);
+base.position.set(0, 25, 0);
+scene.add(base);
+
+const azimuthGroup = new THREE.Group();
+azimuthGroup.position.set(0, 55, 0);
+scene.add(azimuthGroup);
+
+const pivotRing = new THREE.Mesh(
+  new THREE.TorusGeometry(45, 6, 8, 24),
+  new THREE.MeshStandardMaterial({ color: 0x4fd6c8, emissive: 0x113330 })
+);
+pivotRing.rotation.x = Math.PI / 2;
+azimuthGroup.add(pivotRing);
+
+const elevationGroup = new THREE.Group();
+azimuthGroup.add(elevationGroup);
+
+const arm = new THREE.Mesh(
+  new THREE.BoxGeometry(14, 14, 160),
+  new THREE.MeshStandardMaterial({ color: 0x2c3b47 })
+);
+arm.position.z = 80; // extends forward along local +Z
+elevationGroup.add(arm);
+
+const dish = new THREE.Mesh(
+  new THREE.ConeGeometry(28, 46, 20, 1, true),
+  new THREE.MeshStandardMaterial({ color: 0xf2a340, emissive: 0x3a2508, side: THREE.DoubleSide })
+);
+dish.rotation.x = -Math.PI / 2;
+dish.position.z = 165;
+elevationGroup.add(dish);
+
+// pointing beam toward the rocket, dashed for a "targeting" feel
+const beamGeom = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+const beamMat = new THREE.LineDashedMaterial({ color: 0xf2a340, dashSize: 40, gapSize: 24, transparent: true, opacity: 0.8 });
+const beam = new THREE.Line(beamGeom, beamMat);
+scene.add(beam);
+
+// Transparent antenna aperture cone, centered on the dish axis and carried
+// by the elevation/azimuth gimbal so it always follows dish motion.
+const apertureCone = new THREE.Mesh(
+  new THREE.ConeGeometry(1500, 12000, 64, 1, true, 0, Math.PI * 2),
+  new THREE.MeshBasicMaterial({
+    color: 0xf2a340,
+    transparent: true,
+    opacity: 0.12,
+    depthWrite: false,
+    side: THREE.DoubleSide
+  })
+);
+apertureCone.rotation.x = -Math.PI / 2;
+apertureCone.position.set(0, 0, 0);
+elevationGroup.add(apertureCone);
+
+// rocket marker
+const rocket = new THREE.Mesh(
+  new THREE.SphereGeometry(24, 16, 16),
+  new THREE.MeshStandardMaterial({ color: 0xf2a340, emissive: 0x3a2508 })
+);
+scene.add(rocket);
+
+const socket = io();
+let latestFusion = null;
+let latestTelemetry = {};
+
+socket.on('tracker_update', payload => {
+  latestFusion = payload;
+
+  if (!payload) return;
+
+  const yaw = Number(payload.yaw_cmd || 0);
+  const pitch = Number(payload.pitch_cmd || 0);
+  const targetPos = toScene(payload.fused_x || 0, payload.fused_y || 0, payload.fused_alt || 0);
+
+  rocket.position.copy(targetPos);
+  azimuthGroup.rotation.y = THREE.MathUtils.degToRad(yaw);
+  elevationGroup.rotation.x = -THREE.MathUtils.degToRad(pitch);
+
+  document.getElementById('hudYaw').textContent = yaw.toFixed(1) + '°';
+  document.getElementById('hudPitch').textContent = pitch.toFixed(1) + '°';
+  document.getElementById('hudAlt').textContent = Math.round(payload.fused_alt || 0).toLocaleString() + ' m';
+  document.getElementById('hudRange').textContent = Math.round(payload.ground_range || 0).toLocaleString() + ' m';
+
+  updateCoverageAndBeam(targetPos);
+});
+
+socket.on('telemetry_update', packet => {
+  latestTelemetry[packet.sensor] = packet.value;
+});
+
+// ---------------------------------------------------------------------
+// Trajectory sampling + playback
+// ---------------------------------------------------------------------
+const tMin = TRAJECTORY[0][0];
+const tMax = TRAJECTORY[TRAJECTORY.length - 1][0];
+
+function sampleAt(t) {
+  if (t <= tMin) return TRAJECTORY[0];
+  if (t >= tMax) return TRAJECTORY[TRAJECTORY.length - 1];
+  let lo = 0, hi = TRAJECTORY.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (TRAJECTORY[mid][0] <= t) lo = mid; else hi = mid;
+  }
+  const [t0, e0, n0, a0] = TRAJECTORY[lo];
+  const [t1, e1, n1, a1] = TRAJECTORY[hi];
+  const f = (t - t0) / (t1 - t0 || 1);
+  return [t, e0 + (e1 - e0) * f, n0 + (n1 - n0) * f, a0 + (a1 - a0) * f];
+}
+
+function phaseFor(t) {
+  if (t < 4) return 'BOOST';
+  if (t < 45.3) return 'COAST';
+  return 'DESCENT';
+}
+
+let simTime = tMin;
+let playing = false;
+let speed = 5;
+
+const playBtn = document.getElementById('playBtn');
+const scrub = document.getElementById('scrub');
+const timeLabel = document.getElementById('timeLabel');
+const speedSel = document.getElementById('speed');
+
+playBtn.addEventListener('click', () => {
+  playing = !playing;
+  playBtn.textContent = playing ? '⏸ PAUSE' : '▶ PLAY';
+});
+scrub.addEventListener('input', () => {
+  simTime = tMin + parseFloat(scrub.value) * (tMax - tMin);
+  playing = false;
+  playBtn.textContent = '▶ PLAY';
+});
+speedSel.addEventListener('change', () => speed = parseFloat(speedSel.value));
+
+function updateCoverageAndBeam(targetPos) {
+  if (!targetPos) return;
+
+  const dishTip = new THREE.Vector3();
+  dish.getWorldPosition(dishTip);
+
+  // Dashed beam continues to track the fused target position.
+  beam.geometry.setFromPoints([dishTip, targetPos]);
+  beam.computeLineDistances();
+}
+
+function updatePointing(t) {
+  if (latestFusion) {
+    const targetPos = toScene(latestFusion.fused_x || 0, latestFusion.fused_y || 0, latestFusion.fused_alt || 0);
+    rocket.position.copy(targetPos);
+
+    const yaw = Number(latestFusion.yaw_cmd || 0);
+    const pitch = Number(latestFusion.pitch_cmd || 0);
+    azimuthGroup.rotation.y = THREE.MathUtils.degToRad(yaw);
+    elevationGroup.rotation.x = -THREE.MathUtils.degToRad(pitch);
+
+    const dishTip = new THREE.Vector3();
+    dish.getWorldPosition(dishTip);
+    beam.geometry.setFromPoints([dishTip, targetPos]);
+    beam.computeLineDistances();
+
+    document.getElementById('hudTime').textContent = t.toFixed(1) + ' s';
+    document.getElementById('hudYaw').textContent = yaw.toFixed(1) + '°';
+    document.getElementById('hudPitch').textContent = pitch.toFixed(1) + '°';
+    document.getElementById('hudAlt').textContent = Math.round(latestFusion.fused_alt || 0).toLocaleString() + ' m';
+    document.getElementById('hudRange').textContent = Math.round(latestFusion.ground_range || 0).toLocaleString() + ' m';
+
+    updateCoverageAndBeam(targetPos);
+    return;
+  }
+
+  const [, east, north, alt] = sampleAt(t);
+  const targetPos = toScene(east, north, alt);
+
+  rocket.position.copy(targetPos);
+
+  const dx = targetPos.x - gimbalOrigin.x;
+  const dz = targetPos.z - gimbalOrigin.z;
+  const dy = targetPos.y - azimuthGroup.position.y;
+  const groundRange = Math.sqrt(dx * dx + dz * dz);
+  const yawRad = Math.atan2(dx, -dz); // 0 = north (-Z), + = east (+X), matches ENU bearing
+  const pitchRad = Math.atan2(dy, groundRange);
+
+  azimuthGroup.rotation.y = yawRad;
+  elevationGroup.rotation.x = -pitchRad;
+
+  const dishTip = new THREE.Vector3();
+  dish.getWorldPosition(dishTip);
+  beam.geometry.setFromPoints([dishTip, targetPos]);
+  beam.computeLineDistances();
+
+  updateCoverageAndBeam(targetPos);
+
+  const yawDeg = ((yawRad * 180 / Math.PI) + 360) % 360;
+  const pitchDeg = pitchRad * 180 / Math.PI;
+  const range = Math.sqrt(groundRange * groundRange + dy * dy);
+
+  document.getElementById('hudTime').textContent = t.toFixed(1) + ' s';
+  document.getElementById('hudYaw').textContent = yawDeg.toFixed(1) + '°';
+  document.getElementById('hudPitch').textContent = pitchDeg.toFixed(1) + '°';
+  document.getElementById('hudAlt').textContent = Math.round(alt).toLocaleString() + ' m';
+  document.getElementById('hudRange').textContent = Math.round(range).toLocaleString() + ' m';
+  document.getElementById('hudPhase').textContent = phaseFor(t);
+
+  scrub.value = (t - tMin) / (tMax - tMin);
+  timeLabel.textContent = t.toFixed(1) + ' s';
+}
+
+// ---------------------------------------------------------------------
+// Render loop
+// ---------------------------------------------------------------------
+let lastFrame = performance.now();
+function animate() {
+  requestAnimationFrame(animate);
+  const now = performance.now();
+  const dt = (now - lastFrame) / 1000;
+  lastFrame = now;
+
+  if (playing) {
+    simTime += dt * speed;
+    if (simTime >= tMax) { simTime = tMax; playing = false; playBtn.textContent = '▶ PLAY'; }
+  }
+
+  updatePointing(simTime);
+  renderer.render(scene, camera);
+}
+updatePointing(simTime);
+animate();
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+# Raspberry Pi deployment copy and generated runtime data
+/real/
+*.log
+/pointing_values.txt
+
+# Hardware and simulation input files
+/TeensyMk3Code.ino
+/openrocket_data.csv
+/openroc.csv
+
+# Project-local documentation/configuration requested to stay untracked
+/README.md
+
+# Generic generated files
+__pycache__/
+*.py[cod]
+.venv/
+venv/

@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Arbalest · Antenna Tracker</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: #071018;
+        color: #dceaf2;
+        font: 14px system-ui, sans-serif;
+        overflow: hidden;
+      }
+
+      #scene {
+        position: fixed;
+        inset: 0;
+      }
+
+      .panel {
+        position: fixed;
+        background: rgba(12, 25, 36, 0.85);
+        border: 1px solid #294457;
+        border-radius: 12px;
+        backdrop-filter: blur(8px);
+        padding: 14px 16px;
+      }
+
+      .title {
+        top: 18px;
+        left: 18px;
+      }
+
+      .title h1 {
+        font-size: 16px;
+        letter-spacing: 0.12em;
+        margin: 0 0 5px;
+        color: #fff;
+      }
+
+      .title p,
+      .muted {
+        margin: 0;
+        color: #8fa9b9;
+        font-size: 12px;
+      }
+
+      .readout {
+        right: 18px;
+        top: 18px;
+        min-width: 210px;
+      }
+
+      .row {
+        display: flex;
+        justify-content: space-between;
+        gap: 30px;
+        margin: 9px 0;
+      }
+
+      .value {
+        font-family: ui-monospace, monospace;
+        color: #68daf7;
+      }
+
+      .ok {
+        color: #71e6a1;
+      }
+
+      .bad {
+        color: #ff8d8d;
+      }
+
+      .legend {
+        bottom: 18px;
+        left: 18px;
+      }
+
+      .swatch {
+        display: inline-block;
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        margin-right: 6px;
+      }
+
+      .footer {
+        position: fixed;
+        bottom: 18px;
+        right: 18px;
+        color: #8fa9b9;
+        font-size: 12px;
+      }
+
+      @media (max-width: 600px) {
+        .readout {
+          top: auto;
+          bottom: 18px;
+          right: 12px;
+        }
+
+        .footer {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="scene"></div>
+
+    <section class="panel title">
+      <h1>ARBALest TRACKING RANGE</h1>
+      <p>ENU local frame · reference path / received telemetry / predicted pointing</p>
+    </section>
+
+    <section class="panel readout">
+      <div class="row"><span>Link</span><b id="link" class="value">CONNECTING</b></div>
+      <div class="row"><span>Azimuth</span><b id="az" class="value">—</b></div>
+      <div class="row"><span>Tilt</span><b id="tilt" class="value">—</b></div>
+      <div class="row"><span>Slant range</span><b id="range" class="value">—</b></div>
+      <div class="row"><span>Flight time</span><b id="time" class="value">—</b></div>
+      <div class="row"><span>Prediction age</span><b id="age" class="value">—</b></div>
+    </section>
+
+    <section class="panel legend">
+      <span class="swatch" style="background:#ff4d64"></span>planned envelope&nbsp;&nbsp;
+      <span class="swatch" style="background:#fff"></span>received rocket&nbsp;&nbsp;
+      <span class="swatch" style="background:#39d6ff"></span>antenna beam
+    </section>
+
+    <span class="footer">Drag to orbit · scroll to zoom</span>
+
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.module.js"
+        }
+      }
+    </script>
+    <script type="module">
+      import * as THREE from 'three';
+      import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.160.1/examples/jsm/controls/OrbitControls.js';
+
+      const sceneRoot = document.querySelector('#scene');
+      const readout = {
+        link: document.querySelector('#link'),
+        azimuth: document.querySelector('#az'),
+        tilt: document.querySelector('#tilt'),
+        range: document.querySelector('#range'),
+        time: document.querySelector('#time'),
+        age: document.querySelector('#age'),
+      };
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x071018);
+      scene.fog = new THREE.Fog(0x071018, 5000, 24000);
+
+      const camera = new THREE.PerspectiveCamera(48, innerWidth / innerHeight, 0.1, 50000);
+      camera.up.set(0, 0, 1);
+      camera.position.set(5200, -7200, 5100);
+
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.setPixelRatio(devicePixelRatio);
+      sceneRoot.append(renderer.domElement);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(700, 0, 3500);
+      controls.enableDamping = true;
+
+      scene.add(new THREE.HemisphereLight(0xa9d9ff, 0x18231c, 2.2));
+
+      const sun = new THREE.DirectionalLight(0xffffff, 2.3);
+      sun.position.set(-2000, -3000, 8000);
+      scene.add(sun);
+
+      const ground = new THREE.Mesh(
+        new THREE.PlaneGeometry(30000, 30000),
+        new THREE.MeshStandardMaterial({ color: 0x17291d, roughness: 1 })
+      );
+      scene.add(ground);
+
+      const grid = new THREE.GridHelper(12000, 24, 0x274035, 0x1b3027);
+      grid.rotation.x = Math.PI / 2;
+      scene.add(grid);
+      scene.add(new THREE.AxesHelper(1100));
+
+      const tower = new THREE.Group();
+      const towerBody = new THREE.Mesh(
+        new THREE.CylinderGeometry(18, 26, 190, 8),
+        new THREE.MeshStandardMaterial({ color: 0x8796a0, metalness: 0.7 })
+      );
+      towerBody.rotation.x = Math.PI / 2;
+      tower.add(towerBody);
+      tower.position.z = 95;
+      scene.add(tower);
+
+      const antennaBase = new THREE.Group();
+      scene.add(antennaBase);
+
+      const pedestal = new THREE.Mesh(
+        new THREE.CylinderGeometry(30, 42, 22, 12),
+        new THREE.MeshStandardMaterial({ color: 0x657985, metalness: 0.5 })
+      );
+      pedestal.rotation.x = Math.PI / 2;
+      antennaBase.add(pedestal);
+
+      const head = new THREE.Group();
+      head.position.z = 15;
+      antennaBase.add(head);
+
+      const dish = new THREE.Mesh(
+        new THREE.SphereGeometry(58, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2),
+        new THREE.MeshStandardMaterial({
+          color: 0xe0edf4,
+          metalness: 0.75,
+          roughness: 0.25,
+          side: THREE.DoubleSide,
+        })
+      );
+      dish.rotation.x = Math.PI / 2;
+      head.add(dish);
+
+      let beam;
+
+      const rocket = new THREE.Group();
+      rocket.add(
+        new THREE.Mesh(
+          new THREE.CylinderGeometry(7, 7, 65, 12),
+          new THREE.MeshStandardMaterial({
+            color: 0xf7f7f1,
+            emissive: 0x222222,
+          })
+        )
+      );
+
+      const nose = new THREE.Mesh(
+        new THREE.ConeGeometry(7, 25, 12),
+        new THREE.MeshStandardMaterial({ color: 0xff6c49 })
+      );
+      nose.position.z = 45;
+      rocket.add(nose);
+      scene.add(rocket);
+
+      const trail = [];
+      const trailLine = new THREE.Line(
+        new THREE.BufferGeometry(),
+        new THREE.LineBasicMaterial({ color: 0xffffff })
+      );
+      scene.add(trailLine);
+
+      function setBeam(azimuthDeg, tiltDeg, rangeMeters, apertureDeg) {
+        if (beam) {
+          scene.remove(beam);
+        }
+
+        const radius = Math.tan(THREE.MathUtils.degToRad(apertureDeg / 2)) * rangeMeters;
+
+        beam = new THREE.Mesh(
+          new THREE.ConeGeometry(radius, rangeMeters, 32, 1, true),
+          new THREE.MeshBasicMaterial({
+            color: 0x39d6ff,
+            transparent: true,
+            opacity: 0.13,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+          })
+        );
+
+        const origin = antennaBase.position.clone();
+        const azimuth = THREE.MathUtils.degToRad(azimuthDeg);
+        const tilt = THREE.MathUtils.degToRad(tiltDeg);
+        const direction = new THREE.Vector3(
+          Math.sin(azimuth) * Math.cos(tilt),
+          Math.cos(azimuth) * Math.cos(tilt),
+          Math.sin(tilt)
+        );
+
+        beam.position.copy(origin).addScaledVector(direction, rangeMeters / 2);
+        beam.quaternion.setFromUnitVectors(
+          new THREE.Vector3(0, 1, 0),
+          direction.clone().negate()
+        );
+
+        scene.add(beam);
+        head.rotation.y = tilt;
+        antennaBase.rotation.z = -azimuth;
+      }
+
+      function updateReadout(command, telemetry, config) {
+        readout.azimuth.textContent = `${command.azimuth_deg.toFixed(1)}°`;
+        readout.tilt.textContent = `${command.tilt_deg.toFixed(1)}°`;
+        readout.range.textContent = `${(command.range_m / 1000).toFixed(2)} km`;
+        readout.time.textContent = `${telemetry.time_s.toFixed(1)} s`;
+        readout.age.textContent = `${command.prediction_age_s.toFixed(1)} s`;
+
+        const linkText = telemetry.packet_ok ? 'TELEMETRY OK' : 'PACKET LOST · PREDICTING';
+        readout.link.textContent = linkText;
+        readout.link.className = `value ${telemetry.packet_ok ? 'ok' : 'bad'}`;
+
+        setBeam(command.azimuth_deg, command.tilt_deg, command.range_m, config.aperture_deg);
+
+        if (telemetry.rocket_position) {
+          rocket.position.set(...telemetry.rocket_position);
+          trail.push(rocket.position.clone());
+
+          if (trail.length > 900) {
+            trail.shift();
+          }
+
+          trailLine.geometry.setFromPoints(trail);
+        }
+      }
+
+      const socket = io();
+
+      socket.on('tracking_config', (config) => {
+        const bearing = THREE.MathUtils.degToRad(config.antenna_bearing_deg);
+        antennaBase.position.set(
+          Math.sin(bearing) * config.antenna_distance_m,
+          Math.cos(bearing) * config.antenna_distance_m,
+          config.antenna_height_m
+        );
+      });
+
+      socket.on('tracking_update', (event) => {
+        updateReadout(event.command, event, event.config);
+      });
+
+      socket.on('disconnect', () => {
+        readout.link.textContent = 'DISCONNECTED';
+        readout.link.className = 'value bad';
+      });
+
+      function animate() {
+        requestAnimationFrame(animate);
+
+        const rocketScale = Math.max(1, camera.position.distanceTo(rocket.position) / 1800);
+        const antennaScale = Math.max(1, camera.position.distanceTo(antennaBase.position) / 6000);
+
+        rocket.scale.setScalar(rocketScale);
+        antennaBase.scale.setScalar(antennaScale);
+
+        controls.update();
+        renderer.render(scene, camera);
+      }
+      animate();
+
+      addEventListener('resize', () => {
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+      });
+
+      fetch('/trajectory')
+        .then((response) => response.json())
+        .then((data) => {
+          const points = data.trajectory
+            .filter((_, index) => index % 4 === 0)
+            .map((point) => new THREE.Vector3(point.east_m, point.north_m, point.altitude_m));
+
+          const curve = new THREE.CatmullRomCurve3(points);
+          const corridor = new THREE.Mesh(
+            new THREE.TubeGeometry(curve, 240, data.path_uncertainty_m, 10, false),
+            new THREE.MeshBasicMaterial({
+              color: 0xff304f,
+              transparent: true,
+              opacity: 0.12,
+              depthWrite: false,
+            })
+          );
+          scene.add(corridor);
+
+          const reference = new THREE.Line(
+            new THREE.BufferGeometry().setFromPoints(points),
+            new THREE.LineBasicMaterial({
+              color: 0xff4d64,
+              transparent: true,
+              opacity: 0.8,
+            })
+          );
+          scene.add(reference);
+        });
+    </script>
+  </body>
+</html>
+

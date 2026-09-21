@@ -1,1 +1,0 @@
-"The client is using an unsupported version of the Socket.IO or Engine.IO protocols"
